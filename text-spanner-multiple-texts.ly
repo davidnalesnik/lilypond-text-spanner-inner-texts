@@ -78,7 +78,7 @@
                       decimal-amount))
                     (item-to-bump (list-ref result max-location)))
                ;(format #t "guess: ~a~%" result)
-               (list-set! result max-location (1+ (floor item-to-bump)))
+               (list-set! result max-location (ceiling item-to-bump))
                (promote-until-flush result)))))
 
      (let ((result (map inexact->exact
