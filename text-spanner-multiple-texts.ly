@@ -411,32 +411,20 @@ stencils if specified by @code{#t} or @code{#f} in @var{connectors}."
            (join-all (or (null? connectors)
                          (eq? #t connectors)))
            (offset-Y (ly:grob-property grob 'line-Y-offset 0.0))
-           ;; Make connectors stencils.  As they are built, add
-           ;; them to stencil made from texts.
-           (line-contents
-            (let loop ((sps spaces)
-                       (joins connectors)
-                       (result line-contents))
-              (if (null? sps)
-                  result
-                  (loop
-                   (cdr sps)
-                   (or join-all
-                       (and (pair? joins) (cdr joins)))
-                   (if (and
-                        ;; space too short for line
-                        (not (interval-empty? (car sps)))
-                        (or join-all
-                            (and (pair? joins) (car joins))))
-                       (ly:stencil-add
-                        result
-                        ;(make-line-stencil 0.1
-                        ;; For versions < 2.19.27, replace line below with
-                        ;; commented line.  No dashed lines!
-                        (ly:line-interface::line grob
-                          (caar sps) offset-Y
-                          (cdar sps) offset-Y))
-                       result))))))
+           (connector-stils
+            (append-map
+             (lambda (sps joins)
+               (if (and
+                    ;; space too short for line
+                    (not (interval-empty? sps))
+                    (or join-all joins))
+                   (list (ly:line-interface::line grob
+                           (car sps) offset-Y
+                           (cdr sps) offset-Y))
+                   '()))
+             spaces connectors))
+           (connector-stil (apply ly:stencil-add connector-stils))
+           (line-contents (ly:stencil-add connector-stil line-contents)))
 
      line-contents))
 
@@ -444,17 +432,10 @@ stencils if specified by @code{#t} or @code{#f} in @var{connectors}."
    ;; entry point for stencil construction
    ;; connectors is a list of lists, for example:
    ;; '((#t #t)) or '((#t #t) (#t #f))
-   (let loop ((gs grob-or-siblings)
-              (sel stil-extent-list)
-              (cs connectors)
-              (result '()))
-     (if (null? gs)
-         (reverse! result)
-         (loop (cdr gs) (cdr sel) (cdr cs)
-           (cons
-            (make-distributed-line-stencil
-             (car gs) (car sel) (car cs))
-            result)))))
+   (map (lambda (gs sel cs)
+          (make-distributed-line-stencil
+           gs sel cs))
+     grob-or-siblings stil-extent-list connectors))
 
 extractLyricEventInfo =
 #(define-scheme-function (lst) (ly:music?)
