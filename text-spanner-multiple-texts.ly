@@ -496,19 +496,12 @@ addTextSpannerText =
                               line-stils)))
 
                       (define (get-stil-extent-list text-distrib)
-                        (let loop ((gs grob-or-siblings)
-                                   (exts line-extents)
-                                   (idx 0)
-                                   (result '()))
-                          (if (null? gs)
-                              (reverse! result)
-                              (loop (cdr gs) (cdr exts) (1+ idx)
-                                (cons
-                                 (markup-list->stencils-and-extents-for-line
-                                  (car gs)
-                                  (vector-ref text-distrib idx)
-                                  (car exts))
-                                 result)))))
+                        (map (lambda (gs td exts)
+                               (markup-list->stencils-and-extents-for-line
+                                gs td exts))
+                          grob-or-siblings
+                          (vector->list text-distrib)
+                          line-extents))
 
                       (let*
                        (;; vector which gives the text for unbroken spanner
