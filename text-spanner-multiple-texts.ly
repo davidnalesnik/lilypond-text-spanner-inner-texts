@@ -118,18 +118,18 @@ between successive texts."
    ;; _ _three    four
    (let ((text-distribution (vector->list text-distribution)))
      (if (pair? connectors)
-         (let loop ((td text-distribution)
+         (let outer ((td text-distribution)
                     (joins connectors)
-                    (result '()))
+                    (outer-result '()))
            (if (null? td)
-               (reverse! result)
+               (reverse! outer-result)
                (let inner ((texts (car td))
                            (bools joins)
                            (inner-result '()))
                  (cond
                   ((null? (cdr texts))
-                   (loop (cdr td) bools
-                     (cons (reverse! inner-result) result)))
+                   (outer (cdr td) bools
+                     (cons (reverse! inner-result) outer-result)))
                   ;; Ignore spacers since they don't represent a new line.
                   ((equal? "" (cadr texts))
                    (inner (cdr texts) bools inner-result))
