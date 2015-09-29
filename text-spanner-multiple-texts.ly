@@ -165,44 +165,46 @@ of the texts to be used for each line."
                       (ly:warning "Count doesn't match number of texts.")
                       '())
                      text-counts))
-                (text-lines (make-vector gs-len 0))
-                ;; If user hasn't specified a count elsewhere, or
-                ;; 'get-text-distribution' failed, we have this method.
-                ;; Populate vector in a simple way: with two lines,
-                ;; give one text to the first line, one to the second,
-                ;; a second for the first, and second for the second--
-                ;; and so forth, until all texts have been exhausted.  So
-                ;; for 3 lines and 7 texts we would get this arrangement:
-                ;; 3, 2, 2.
-                (text-counts
+                (text-lines (make-vector gs-len 0)))
+
+           ;; First, read number of texts per line into vector.
+           (if (pair? text-counts)
+               ;; Valid line counts so no need to modify.
+               (set! text-lines (list->vector text-counts))
+               ;; If user hasn't specified a count elsewhere, or
+               ;; 'get-text-distribution' failed, we have this method.
+               ;; Populate vector in a simple way: with two lines,
+               ;; give one text to the first line, one to the second,
+               ;; a second for the first, and second for the second--
+               ;; and so forth, until all texts have been exhausted.  So
+               ;; for 3 lines and 7 texts we would get this arrangement:
+               ;; 3, 2, 2.
+               ;; With code improvements, this will not be needed.
+               (let loop ((txts texts) (idx 0))
                  (cond
-                  ((null? text-counts)
-                   (let loop ((txts texts) (idx 0))
-                     (cond
-                      ((null? txts) text-lines)
-                      ;; We need to ensure that the last line has text.
-                      ;; This may require skipping lines.
-                      ((and (null? (cdr txts))
-                            (< idx (1- gs-len))
-                            (= 0 (vector-ref text-lines (1- gs-len))))
-                       (vector-set! text-lines (1- gs-len) 1)
-                       text-lines)
-                      (else
-                       (vector-set! text-lines idx
-                         (1+ (vector-ref text-lines idx)))
-                       (loop (cdr txts)
-                         (if (= idx (1- gs-len)) 0 (1+ idx)))))))
-                  (else (set! text-lines (list->vector text-counts)))))
-                ;; read texts into vector
-                (texts-by-line
-                 (let loop ((idx 0) (texts texts))
-                   (if (= idx gs-len)
-                       text-lines
-                       (let ((num (vector-ref text-lines idx)))
-                         (vector-set! text-lines idx
-                           (list-head texts num))
-                         (loop (1+ idx)
-                           (list-tail texts num)))))))
+                  ((null? txts) '())
+                  ;; We need to ensure that the last line has text.
+                  ;; This may require skipping lines.
+                  ((and (null? (cdr txts))
+                        (< idx (1- gs-len))
+                        (= 0 (vector-ref text-lines (1- gs-len))))
+                   (vector-set! text-lines (1- gs-len) 1))
+                  (else
+                   (vector-set! text-lines idx
+                     (1+ (vector-ref text-lines idx)))
+                   (loop (cdr txts)
+                     (if (= idx (1- gs-len)) 0 (1+ idx)))))))
+
+
+           ;; Next, replace text counts with actual texts.
+           (let loop ((idx 0) (texts texts))
+             (if (= idx gs-len)
+                 '()
+                 (let ((num (vector-ref text-lines idx)))
+                   (vector-set! text-lines idx
+                     (list-head texts num))
+                   (loop (1+ idx)
+                     (list-tail texts num)))))
 
            text-lines))))
 
