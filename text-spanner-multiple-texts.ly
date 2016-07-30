@@ -1,4 +1,4 @@
-\version "2.19.27"
+\version "2.19.45"
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%% FUNCTIONS TO INCLUDE %%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -26,68 +26,66 @@
 % Vertical shift of connector line, independenf of texts.
 #(cn-define-grob-property 'line-Y-offset number?)
 
+#(define (lengths->cumulative-extent-list ls)
+   (let inner ((ls ls) (prev 0) (result '()))
+     (if (null? ls)
+         (reverse result)
+         (inner
+          (cdr ls)
+          (+ prev (car ls))
+          (cons (cons prev (+ (car ls) prev))
+            result)))))
+
+#(define (assign-line my-X line-exts)
+   (let inner ((line-exts line-exts) (idx 0))
+     (cond
+      ((null? line-exts) #f)
+      ((and (<= (caar line-exts) my-X)
+            (<= my-X (cdar line-exts)))
+       idx)
+      (else (inner (cdr line-exts) (1+ idx))))))
+%{
+#(define (count-adjacent-duplicates ls)
+   (define (inner ls counter curr result)
+     (cond
+      ((null? ls) (reverse (cons counter result)))
+      ((eq? (car ls) curr)
+       (inner (cdr ls) (1+ counter) curr result))
+      (else
+       (inner (cdr ls) 1 (car ls) (cons counter result)))))
+   (if (null? ls)
+       '()
+       (inner ls 0 (car ls) '())))
+%}
+#(define (text-count-per-line ls line-count)
+   (define (inner ls counter lines result)
+     (cond
+      ((null? ls) (reverse (cons counter result)))
+      ((eq? (car ls) (car lines))
+       (inner (cdr ls) (1+ counter) lines result))
+      (else
+       (inner ls 0 (cdr lines) (cons counter result)))))
+   (if (null? ls)
+       '()
+       (inner ls 0 (iota line-count) '())))
+
+% Spread texts evenly over available lines taking into account line lengths.  Return
+% a list showing number of texts per line.
+% TODO: take into account the extent of texts, rather than assuming them to be
+% dimensionless
 #(define (get-text-distribution text-list line-extents)
-   ;; Given a list of texts and a list of line extents, attempt to
-   ;; find a decent line distribution.  The goal is to put more texts
-   ;; on longer lines, while ensuring that first and last lines are texted.
-   ;; TODO: ideally, we should consider extents of text, rather than
-   ;; simply their number.
    (let* ((line-count (length line-extents))
           (text-count (length text-list))
           (line-lengths
            (map (lambda (line) (interval-length line))
              line-extents))
-          (total-line-len (apply + line-lengths))
-          (exact-per-line
-           (map (lambda (line-len)
-                  (* text-count (/ line-len total-line-len)))
-             line-lengths))
-          ;; First and last lines can't be untexted.
-          (adjusted
-           (let loop ((epl exact-per-line) (idx 0) (result '()))
-             (if (null? epl)
-                 (reverse! result)
-                 (if (and (or (= idx 0)
-                              (= idx (1- line-count)))
-                          (< (car epl) 1.0))
-                     (loop (cdr epl) (1+ idx)
-                       (cons 1.0 result))
-                     (loop (cdr epl) (1+ idx)
-                       (cons (car epl) result)))))))
-     ;; The idea is to raise the "most roundable" line's count, then the
-     ;; "next most roundable," and so forth, until we account for all texts.
-     ;; Everything else is rounded down (except those lines which need to be
-     ;; bumped up to get the minimum of one text), so we shouldn't exceed our
-     ;; total number of texts.
-     ;; TODO: Need a promote-demote-until-flush to be safe, unless this is
-     ;; mathematically sound!
-     (define (promote-until-flush result)
-       (let* ((floored (map floor result))
-              (total (apply + floored)))
-
-         (if (>= total text-count)
-             (begin
-              ;(format #t "guess: ~a~%~%~%" result)
-              floored)
-             (let* ((decimal-amount
-                     (map (lambda (x) (- x (floor x))) result))
-                    (maximum (apply max decimal-amount))
-                    (max-location
-                     (list-index
-                      (lambda (x) (= x maximum))
-                      decimal-amount))
-                    (item-to-bump (list-ref result max-location)))
-               ;(format #t "guess: ~a~%" result)
-               (list-set! result max-location (ceiling item-to-bump))
-               (promote-until-flush result)))))
-
-     (let ((result (map inexact->exact
-                     (promote-until-flush adjusted))))
-       (if (not (= (apply + result) text-count))
-           ;; If this doesn't work, discard, triggering crude
-           ;; distribution elsewhere.
-           '()
-           result))))
+          (total-line-length (apply + line-lengths))
+          (space-between (/ total-line-length (1- text-count)))
+          (positions (map (lambda (e) (* e space-between)) (iota text-count)))
+          (segment-exts (lengths->cumulative-extent-list line-lengths))
+          (line-assignments (map (lambda (x) (assign-line x segment-exts)) positions))
+          (count-per-line (text-count-per-line line-assignments line-count)))
+     count-per-line))
 
 #(define (get-broken-connectors grob text-distribution connectors)
    "Modify @var{connectors} to reflect line breaks.  Return a list
@@ -116,23 +114,27 @@ between successive texts."
    ;; _ _ _ _ _ _ _
    ;; (#t      #f))
    ;; _ _three    four
+
    (let ((text-distribution (vector->list text-distribution)))
      (if (pair? connectors)
          (let outer ((td text-distribution)
-                    (joins connectors)
-                    (outer-result '()))
+                     (joins connectors)
+                     (outer-result '()))
            (if (null? td)
-               (reverse! outer-result)
+               (reverse outer-result)
                (let inner ((texts (car td))
                            (bools joins)
                            (inner-result '()))
                  (cond
                   ((null? (cdr texts))
                    (outer (cdr td) bools
-                     (cons (reverse! inner-result) outer-result)))
-                  ;; Ignore spacers since they don't represent a new line.
+                     (cons (reverse inner-result) outer-result)))
+                  ;; pass over spacers since they will not begin a new connecting line
+                  ;; they simply change the length of an existing connector
                   ((equal? "" (cadr texts))
                    (inner (cdr texts) bools inner-result))
+                  ;; line ending marker
+                  ;; Don't advance bools because we copy value to head of next line's list
                   ((equal? (cadr texts) #{ \markup \null #})
                    (inner (cdr texts) bools
                      (cons (car bools) inner-result)))
@@ -163,40 +165,11 @@ of the texts to be used for each line."
                           (not (= (apply + text-counts) texts-len)))
                      (begin
                       (ly:warning "Count doesn't match number of texts.")
-                      '())
+                      (get-text-distribution texts extents))
                      text-counts))
-                (text-lines (make-vector gs-len 0)))
+                (text-lines (list->vector text-counts)))
 
-           ;; First, read number of texts per line into vector.
-           (if (pair? text-counts)
-               ;; Valid line counts so no need to modify.
-               (set! text-lines (list->vector text-counts))
-               ;; If user hasn't specified a count elsewhere, or
-               ;; 'get-text-distribution' failed, we have this method.
-               ;; Populate vector in a simple way: with two lines,
-               ;; give one text to the first line, one to the second,
-               ;; a second for the first, and second for the second--
-               ;; and so forth, until all texts have been exhausted.  So
-               ;; for 3 lines and 7 texts we would get this arrangement:
-               ;; 3, 2, 2.
-               ;; With code improvements, this will not be needed.
-               (let loop ((txts texts) (idx 0))
-                 (cond
-                  ((null? txts) '())
-                  ;; We need to ensure that the last line has text.
-                  ;; This may require skipping lines.
-                  ((and (null? (cdr txts))
-                        (< idx (1- gs-len))
-                        (= 0 (vector-ref text-lines (1- gs-len))))
-                   (vector-set! text-lines (1- gs-len) 1))
-                  (else
-                   (vector-set! text-lines idx
-                     (1+ (vector-ref text-lines idx)))
-                   (loop (cdr txts)
-                     (if (= idx (1- gs-len)) 0 (1+ idx)))))))
-
-
-           ;; Next, replace text counts with actual texts.
+           ;; Replace text counts with actual texts.
            (let loop ((idx 0) (texts texts))
              (if (= idx gs-len)
                  '()
@@ -248,9 +221,7 @@ equal."
              line-contents))
           (text-lengths
            (map (lambda (te) (interval-length te)) text-extents))
-          (total-text-length
-           (apply + (map (lambda (te) (interval-length te))
-                      text-extents)))
+          (total-text-length (apply + text-lengths))
           (total-fill-space (- line-width total-text-length))
           (word-count (length line-contents))
           (padding (/ (- line-width total-text-length) (1- word-count)))
@@ -270,7 +241,7 @@ equal."
                        (lengths text-lengths)
                        (shift 0.0) (result '()))
              (if (null? contents)
-                 (reverse! result)
+                 (reverse result)
                  (loop
                   (cdr contents) (cdr exts) (cdr lengths)
                   (+ shift (car lengths) padding)
@@ -287,7 +258,7 @@ equal."
            (let loop ((orig stencils-shifted-extents-list) (idx 0) (result '()))
              (cond
               ((= idx (length stencils-shifted-extents-list))
-               (reverse! result))
+               (reverse result))
               ;; Ignore first and last stencils, which--if point stencil--
               ;; will be markers.
               ((or (= idx 0)
@@ -361,7 +332,7 @@ stencils if specified by @code{#t} or @code{#f} in @var{connectors}."
             (let loop ((orig extents) (idx 0) (result '()))
               (cond
                ((= idx (length extents))
-                (reverse! result))
+                (reverse result))
                ;; Don't widen line markers.  Recognition is based on extent,
                ;; which is not ideal.
                ((= (caar orig) (cdar orig))
@@ -400,7 +371,7 @@ stencils if specified by @code{#t} or @code{#f} in @var{connectors}."
                 (let loop ((orig padded-extents-list)
                            (result '()))
                   (if (null? (cdr orig))
-                      (reverse! result)
+                      (reverse result)
                       (loop
                        (cdr orig)
                        (cons
@@ -545,7 +516,7 @@ addTextSpannerText =
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% EXAMPLES %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 \markup \bold "Default (no inner text possible)"
-%%{
+
 \relative c'' {
   %\override TextSpanner.thickness = 5
   \override TextSpanner.bound-details.left.text = "ral"
@@ -556,6 +527,7 @@ addTextSpannerText =
   \break
   d'1\stopTextSpan
 }
+
 \markup \bold "All on one line"
 
 \relative c' {
@@ -563,19 +535,20 @@ addTextSpannerText =
   c1\startTextSpan
   d'1\stopTextSpan
 }
-%}
+
 
 \markup \bold "Broken"
 
 \relative c' {
   %% to show collision detection
   %\override TextSpanner.text-spanner-line-count = #'(2 2)
-  \addTextSpannerText \lyricmode { ral -- "" -- len -- tan -- do }
+  \addTextSpannerText \lyricmode { ral -- len -- tan -- do }
   c1\startTextSpan
   \break
+  %c1\break
   d'1\stopTextSpan
 }
-%%{
+
 \markup \bold "Empty line/manual distribution"
 
 \relative c' {
@@ -675,7 +648,7 @@ addTextSpannerText =
   d'1\stopTextSpan
 }
 
-
+%%{
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % See http://www.lilypond.org/doc/v2.19/Documentation/notation/opera-and-stage-musicals#dialogue-over-music
 music = \relative {
