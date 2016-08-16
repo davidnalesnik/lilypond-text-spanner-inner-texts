@@ -1,6 +1,23 @@
-\version "2.19.45"
+\version "2.19.46"
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%% FUNCTIONS TO INCLUDE %%%%%%%%%%%%%%%%%%%%%%%%
+#(define (offset-subtract a b)
+   (cons (- (car b) (car a))
+     (- (cdr b) (cdr a))))
+
+% Rewrite of Offset::direction in LilyPond source file 'flower/offset.cc'
+#(define (offset-direction o)
+   (cond
+    ((and (inf? (car o)) (not (inf? (cdr o))))
+     (cons (if (> (car o) 0.0) 1.0 -1.0)
+       0.0))
+    ((inf? (cdr o))
+     (cons 0.0
+       (if (> (cdr o) 0.0) 1.0 -1.0)))
+    ((and (= (car o) 0.0) (= (cdr o) 0.0))
+     o)
+    (else
+     (let ((len (sqrt (+ (* (car o)(car o)) (* (cdr o)(cdr o))))))
+       (cons (/ (car o) len) (/ (cdr o) len))))))
 
 %% CUSTOM GROB PROPERTIES
 
@@ -13,11 +30,10 @@
    (set-object-property! symbol 'backend-doc "custom grob property")
    symbol)
 
-% For internal use.
-#(cn-define-grob-property 'text-spanner-stencils list?)
-
-% user interface
-#(cn-define-grob-property 'text-spanner-line-count number-list?)
+% Count of _inner_ texts per line; does not include bound-details.left.text
+% and bound-details.right.text.  This is set automatically but may be
+% overridden.
+#(cn-define-grob-property 'inner-text-count-by-line number-list?)
 
 % How much space between line and object to left and right?
 % Default is '(0.0 . 0.0).
@@ -26,6 +42,9 @@
 % Vertical shift of connector line, independenf of texts.
 #(cn-define-grob-property 'line-Y-offset number?)
 
+% Turn a list of lengths into contiguous extents
+% '(10 20 5) -> '((0 . 10) (10 . 30) (30 . 35))
+% Used with line lengths to decide where to place an inner text
 #(define (lengths->cumulative-extent-list ls)
    (let inner ((ls ls) (prev 0) (result '()))
      (if (null? ls)
@@ -36,6 +55,8 @@
           (cons (cons prev (+ (car ls) prev))
             result)))))
 
+% Place a text by x coordinate within a list of contiguous extents
+% representing lines
 #(define (assign-line my-X line-exts)
    (let inner ((line-exts line-exts) (idx 0))
      (cond
@@ -44,23 +65,14 @@
             (<= my-X (cdar line-exts)))
        idx)
       (else (inner (cdr line-exts) (1+ idx))))))
-%{
-#(define (count-adjacent-duplicates ls)
-   (define (inner ls counter curr result)
-     (cond
-      ((null? ls) (reverse (cons counter result)))
-      ((eq? (car ls) curr)
-       (inner (cdr ls) (1+ counter) curr result))
-      (else
-       (inner (cdr ls) 1 (car ls) (cons counter result)))))
-   (if (null? ls)
-       '()
-       (inner ls 0 (car ls) '())))
-%}
+
+% count adjacent duplicates.  Used to determine count of the inner texts assigned to
+% each line of our spanner.
 #(define (text-count-per-line ls line-count)
    (define (inner ls counter lines result)
      (cond
-      ((null? ls) (reverse (cons counter result)))
+      ((null? lines) (reverse result))
+      ((null? ls) (inner ls 0 (cdr lines) (cons counter result)))
       ((eq? (car ls) (car lines))
        (inner (cdr ls) (1+ counter) lines result))
       (else
@@ -74,301 +86,156 @@
 % TODO: take into account the extent of texts, rather than assuming them to be
 % dimensionless
 #(define (get-text-distribution text-list line-extents)
-   (let* ((line-count (length line-extents))
-          (text-count (length text-list))
-          (line-lengths
-           (map (lambda (line) (interval-length line))
-             line-extents))
-          (total-line-length (apply + line-lengths))
-          (space-between (/ total-line-length (1- text-count)))
-          (positions (map (lambda (e) (* e space-between)) (iota text-count)))
-          (segment-exts (lengths->cumulative-extent-list line-lengths))
-          (line-assignments (map (lambda (x) (assign-line x segment-exts)) positions))
-          (count-per-line (text-count-per-line line-assignments line-count)))
-     count-per-line))
+   (let ((line-count (length line-extents))
+         (text-count (length text-list)))
+     (if (= 0 text-count)
+         (make-list line-count 0)
+         (let* ((line-lengths
+                 (map (lambda (line) (interval-length line))
+                   line-extents))
+                (total-line-length (apply + line-lengths))
+                (space-between (/ total-line-length (1+ text-count)))
+                (positions
+                 (map (lambda (e) (* e space-between))
+                   (iota text-count 1)))
+                (segment-exts (lengths->cumulative-extent-list line-lengths))
+                (line-assignments
+                 (map (lambda (x) (assign-line x segment-exts))
+                   positions))
+                (count-per-line (text-count-per-line line-assignments line-count)))
 
-#(define (get-broken-connectors grob text-distribution connectors)
-   "Modify @var{connectors} to reflect line breaks.  Return a list
-of lists of booleans representing whether to draw a connecting line
-between successive texts."
-   ;; The variable 'connectors' holds a list of booleans representing whether
-   ;; a line will be drawn between two successive texts.  This function
-   ;; transforms the list of booleans into a list of lists of booleans
-   ;; which reflects line breaks and the additional lines which must be drawn.
-   ;;
-   ;; Given an input of '(#t #t #f)
-   ;;
-   ;;    '((#t        #t            #f))
-   ;; one_ _ _ _two_ _ _ _ _three        four  (one line)
-   ;;
-   ;;     '((#t       #t)
-   ;; one_ _ _ _two_ _ _ _ _                   (two lines)
-   ;;   (#t         #f))
-   ;; _ _ _ _three     four
-   ;;
-   ;;     '((#t)
-   ;; one_ _ _ _                               (four lines/blank)
-   ;; (#t       #t)
-   ;; _ _ _two_ _ _
-   ;;      (#t)
-   ;; _ _ _ _ _ _ _
-   ;; (#t      #f))
-   ;; _ _three    four
-
-   (let ((text-distribution (vector->list text-distribution)))
-     (if (pair? connectors)
-         (let outer ((td text-distribution)
-                     (joins connectors)
-                     (outer-result '()))
-           (if (null? td)
-               (reverse outer-result)
-               (let inner ((texts (car td))
-                           (bools joins)
-                           (inner-result '()))
-                 (cond
-                  ((null? (cdr texts))
-                   (outer (cdr td) bools
-                     (cons (reverse inner-result) outer-result)))
-                  ;; pass over spacers since they will not begin a new connecting line
-                  ;; they simply change the length of an existing connector
-                  ((equal? "" (cadr texts))
-                   (inner (cdr texts) bools inner-result))
-                  ;; line ending marker
-                  ;; Don't advance bools because we copy value to head of next line's list
-                  ((equal? (cadr texts) #{ \markup \null #})
-                   (inner (cdr texts) bools
-                     (cons (car bools) inner-result)))
-                  (else
-                   (inner (cdr texts) (cdr bools)
-                     (cons (car bools) inner-result)))))))
-
-         connectors)))
-
-#(define (get-line-arrangement grob-or-siblings extents texts)
-   "Given a list of spanner extents and texts, return a vector of lists
-of the texts to be used for each line."
-   (let ((gs-len (length grob-or-siblings)))
-     (if (= gs-len 1)
-         ;; only one line...
-         (make-vector 1 texts)
-         (let* ((texts-len (length texts))
-                (text-counts
-                 (ly:grob-property
-                  (car grob-or-siblings) 'text-spanner-line-count))
-                (text-counts
-                 (cond
-                  ((pair? text-counts) text-counts) ; manual override
-                  ((= 1 gs-len) '())
-                  (else (get-text-distribution texts extents))))
-                (text-counts
-                 (if (and (pair? text-counts)
-                          (not (= (apply + text-counts) texts-len)))
-                     (begin
-                      (ly:warning "Count doesn't match number of texts.")
-                      (get-text-distribution texts extents))
-                     text-counts))
-                (text-lines (list->vector text-counts)))
-
-           ;; Replace text counts with actual texts.
-           (let loop ((idx 0) (texts texts))
-             (if (= idx gs-len)
-                 '()
-                 (let ((num (vector-ref text-lines idx)))
-                   (vector-set! text-lines idx
-                     (list-head texts num))
-                   (loop (1+ idx)
-                     (list-tail texts num)))))
-
-           text-lines))))
-
-#(define (add-markers text-lines)
-   ;; Markers are added to the broken edges of spanners to serve as anchors
-   ;; for connector lines beginning and ending systems.
-   ;; Add null-markup at the beginning of lines 2...n.
-   ;; Add null-markup at the end of lines 1...(n-1).
-   ;; Note: this modifies the vector 'text-lines'.
-   (let loop ((idx 0))
-     (if (= idx (vector-length text-lines))
-         text-lines
-         (begin
-          (if (> idx 0)
-              (vector-set! text-lines idx
-                (cons #{ \markup \null #}
-                  (vector-ref text-lines idx))))
-          (if (< idx (1- (vector-length text-lines)))
-              (vector-set! text-lines idx
-                (append (vector-ref text-lines idx)
-                  (list #{ \markup \null #}))))
-          (loop (1+ idx))))))
+           count-per-line))))
 
 %% Adapted from 'justify-line-helper' in scm/define-markup-commands.scm.
-#(define (markup-list->stencils-and-extents-for-line grob texts extent)
-   "Given a list of markups @var{texts}, return a list of stencils and extents
-spread along an extent @var{extent}, such that the intervening spaces are
-equal."
-   (let* ((orig-stencils
-           (map (lambda (a) (grob-interpret-markup grob a)) texts))
-          (line-contents
-           (map (lambda (stc)
-                  (if (ly:stencil-empty? stc X)
-                      (ly:make-stencil (ly:stencil-expr stc)
-                        '(0 . 0) (ly:stencil-extent stc Y))
-                      stc))
-             orig-stencils))
-          (line-width (interval-length extent))
-          (text-extents
-           (map (lambda (stc) (ly:stencil-extent stc X))
-             line-contents))
-          (text-lengths
-           (map (lambda (te) (interval-length te)) text-extents))
-          (total-text-length (apply + text-lengths))
-          (total-fill-space (- line-width total-text-length))
-          (word-count (length line-contents))
-          (padding (/ (- line-width total-text-length) (1- word-count)))
-          ;; How much shift is necessary to align left edge of first
-          ;; stencil with extent?  Apply this shift to all stencils.
-          (text-extents
-           (map (lambda (stc)
-                  (coord-translate
-                   stc
-                   (- (car extent) (caar text-extents))))
-             text-extents))
-          ;; Make a list of stencils and their extents, such that they
-          ;; are spread across the line with equal space ('padding') in
-          ;; between.
-          (stencils-shifted-extents-list
-           (let loop ((contents line-contents) (exts text-extents)
-                       (lengths text-lengths)
-                       (shift 0.0) (result '()))
-             (if (null? contents)
-                 (reverse result)
-                 (loop
-                  (cdr contents) (cdr exts) (cdr lengths)
-                  (+ shift (car lengths) padding)
-                  (cons
-                   (cons
-                    (car contents)
-                    (coord-translate (car exts) shift))
-                   result)))))
-          ;; Remove non-marker spacers from list of extents.  This is done
-          ;; so that a single line is drawn to cover the total gap rather
-          ;; than several. (A single line is needed since successive dashed
-          ;; lines will not connect properly.)
-          (stencils-extents-list-no-spacers
-           (let loop ((orig stencils-shifted-extents-list) (idx 0) (result '()))
+#(define (inner-texts->stencils grob texts extent)
+   "Given a list of markups @var{texts}, return a list of stencils spread along an extent
+@var{extent}, such that the intervening spaces are equal."
+   (if (null? texts)
+       '()
+       (let* ((line-contents
+               (map (lambda (t) (grob-interpret-markup grob t)) texts))
+              (text-extents
+               (map (lambda (stc) (ly:stencil-extent stc X))
+                 line-contents))
+              ;; spacers ("") create empty-stencils, which have X-extent '(+inf.0 . -inf.0)
+              ;; Change to (0.0 . 0.0) so calculations work
+              (text-extents
+               (map (lambda (te) (if (interval-empty? te) (cons 0.0 0.0) te))
+                 text-extents))
+              (text-lengths (map interval-length text-extents))
+              (total-text-length (apply + text-lengths))
+              (line-width (interval-length extent))
+              (total-fill-space (- line-width total-text-length))
+              (word-count (length line-contents))
+              (padding (/ (- line-width total-text-length) (1+ word-count)))
+              (distributed-stils
+               (let loop ((contents line-contents) (exts text-extents)
+                           (lengths text-lengths)
+                           (shift (- padding (caar text-extents))) (result '()))
+                 (if (null? contents)
+                     (reverse result)
+                     (loop
+                      (cdr contents) (cdr exts) (cdr lengths)
+                      (+ shift (car lengths) padding)
+                      (cons
+                       (ly:stencil-translate-axis
+                        (car contents)
+                        (+ (caar exts) shift)
+                        X)
+                       result)))))
+              (distributed-stils
+               (map (lambda (s) (ly:stencil-translate-axis s (car extent) X))
+                 distributed-stils)))
+
+         distributed-stils)))
+
+% Create sublists in a list according to a count list.
+% Given '("this" "is" "a" "list" "of" "texts") and '(1 0 3 2)
+% -> ((this) () (is a list) (of texts))
+#(define (nest-list-by-count text-list line-count-list)
+   (let inner ((line-count-list line-count-list) (text-list text-list) (result '()))
+     (if (null? line-count-list)
+         (reverse result)
+         (inner
+          (cdr line-count-list)
+          (list-tail text-list (car line-count-list))
+          (cons (list-head text-list (car line-count-list)) result)))))
+
+% Return a list of texts assigned to a line.
+#(define (get-texts grob gs text-list)
+   (let* ((tslc (ly:grob-property grob 'inner-text-count-by-line))
+          (my-count (list-index (lambda (x) (eq? grob x)) gs))
+          (text-list (nest-list-by-count text-list tslc)))
+     (list-ref text-list my-count)))
+
+% Given a list of connectors (lines drawn between texts) expressed as
+% booleans, return a list with a sublist for each line.
+%
+% Given an input of '(#t #t #f)
+%
+%    '((#t        #t            #f))
+%  one_ _ _ _two_ _ _ _ _three        four  (one line)
+%
+%       '((#t       #t)
+%   one_ _ _ _two_ _ _ _ _                   (two lines)
+%    (#t         #f))
+%   _ _ _ _three     four
+%
+%       '((#t)
+%    one_ _ _ _                               (four lines/blank)
+%    (#t       #t)
+%    _ _ _two_ _ _
+%         (#t)
+%    _ _ _ _ _ _ _
+%   (#t      #f))
+%    _ _three    four
+
+
+% TODO: deal with superfluous boolean at the end of input list (not
+% represented in diagram above).
+#(define (get-connectors grob gs connector-list)
+   (let* ((tslc (ly:grob-property grob 'inner-text-count-by-line))
+          ;; Accommodate left.text and right.text.  Ugh.
+          (tslc (cons (1+ (car tslc)) (cdr tslc)))
+          (tslc (append (list-head tslc (1- (length tslc)))
+                  (list (1+ (last tslc)))))
+          (boolean-list (nest-list-by-count connector-list tslc))
+          ;; copy last boolean of sublist to head of following sublist
+          (boolean-list
+           (let loop ((bl boolean-list)
+                      (carry '())
+                      (result '()))
              (cond
-              ((= idx (length stencils-shifted-extents-list))
-               (reverse result))
-              ;; Ignore first and last stencils, which--if point stencil--
-              ;; will be markers.
-              ((or (= idx 0)
-                   (= idx (1- (length stencils-shifted-extents-list))))
-               (loop (cdr orig) (1+ idx)
-                 (cons (car orig) result)))
-              ;; Remove spacers.  Better way to identify them than comparing
-              ;; left and right extents?
-              ((= (cadar orig) (cddar orig))
-               (loop (cdr orig) (1+ idx) result))
-              ;; Keep any visible stencil.
-              (else (loop (cdr orig) (1+ idx)
-                      (cons (car orig) result)))))))
+              ((null? bl) (reverse result))
+              (else
+               (loop (cdr bl)
+                 (if (pair? (car bl))
+                     (last (car bl))
+                     carry)
+                 (if (boolean? carry)
+                     (cons (cons carry (car bl)) result)
+                     (cons (car bl) result)))))))
+          (my-count (list-index (lambda (x) (eq? grob x)) gs))
+          (my-connectors (list-ref boolean-list my-count)))
 
-     stencils-extents-list-no-spacers))
+     my-connectors))
 
-#(define (check-for-overlaps stil-extent-list)
-   (let* ((collision
-           (lambda (line)
-             (let loop ((exts (map cdr line)) (result '()))
-               (if (null? (cdr exts))
-                   (reverse! result)
-                   (loop (cdr exts)
-                     (cons
-                      (not (interval-empty?
-                            (interval-intersection
-                             (car exts) (cadr exts))))
-                      result))))))
-          ;; ==> list of lists of booleans comparing first element to second,
-          ;; second to third, etc., for each line.  #f = no collision
-          (all-successive-collisions
-           (map (lambda (line) (collision line))
-             stil-extent-list)))
-
-     ;; For now, just print a warning and return #t if any collision anywhere.
-     ;; Returned boolean is not used elsewhere, but keep it in case.
-     (let loop ((lines all-successive-collisions) (idx 0) (collisions? #f))
-       (cond
-        ((null? lines) collisions?)
-        ((any (lambda (p) (eq? p #t)) (car lines))
-         (ly:warning
-          "overlap(s) found on line ~a; redistribute manually"
-          (1+ idx))
-         (loop (cdr lines) (1+ idx) #t))
-        (else
-         (loop (cdr lines) (1+ idx) collisions?))))))
-
-
-#(define (make-distributed-line-stencil grob stil-stil-extent-list connectors)
-   "Take a list of stencils and arbitrary extents and return a combined
-stencil conforming to the given extents.  Lines are drawn/not drawn between
-stencils if specified by @code{#t} or @code{#f} in @var{connectors}."
-   (let* (;; First create a stencil consisting of text items.
-           (line-contents
-            (map (lambda (elem)
-                   (ly:stencil-translate-axis
-                    (car elem)
-                    (- (cadr elem) (car (ly:stencil-extent (car elem) X)))
-                    X))
-              stil-stil-extent-list))
-           (line-contents (apply ly:stencil-add line-contents))
-           ;; Now make the connectors.
-           ;; To handle overrides of line starts and ends, we modify
-           ;; the extents from 'stil-stil-extent-list.
-           (extents (map cdr stil-stil-extent-list))
-           (padding (ly:grob-property grob 'line-X-offset (cons 0.0 0.0)))
-           (padding-L (car padding))
-           (padding-R (cdr padding))
-           ;; Offsets to line endpoints depend on what the line connects.
-           (padded-extents-list
-            (let loop ((orig extents) (idx 0) (result '()))
-              (cond
-               ((= idx (length extents))
-                (reverse result))
-               ;; Don't widen line markers.  Recognition is based on extent,
-               ;; which is not ideal.
-               ((= (caar orig) (cdar orig))
-                (loop (cdr orig) (1+ idx)
-                  (cons (car orig) result)))
-               ;; A connector drawn to an object beginning a line will only
-               ;; be padded on the right.
-               ((= idx 0)
-                (loop (cdr orig) (1+ idx)
-                  (cons
-                   (coord-translate
-                    (car orig) (cons 0 padding-R))
-                   result)))
-               ;; A connector drawn from the last object on a line will only
-               ;; be padded on the left.
-               ((= idx (1- (length extents)))
-                (loop (cdr orig) (1+ idx)
-                  (cons
-                   (coord-translate
-                    (car orig) (cons (- padding-L) 0.0))
-                   result)))
-               ;; Lines joining objects on both sides are padded at both ends.
-               (else
-                (loop (cdr orig) (1+ idx)
-                  (cons
-                   (coord-translate
-                    (car orig)
-                    (cons (- padding-L)
-                      padding-R))
-                   result))))))
-           ;; Read connector extents from modified list of extents.
-           ;; ((1-L . 1-R) (2-L . 2-R) (3-L . 3-R)) ;; padded extents of texts
+% Return a stencil for a line of a text spanner including text and connector stencils.
+#(define (build-line-stencil grob gs stils connectors)
+   (let* (;; Remove spacers so that a single line is drawn to cover the total gap
+           ;; rather than several. (Successive dashed lines will not connect properly.)
+           ;; This leaves null markups which produce point stencils
+           (stils (remove ly:stencil-empty? stils))
+           (line-contents (apply ly:stencil-add stils))
+           (extents (map (lambda (s) (ly:stencil-extent s X))
+                      stils))
+           (my-connectors (get-connectors grob gs connectors))
+           ;; Read connector extents from list of text extents.
+           ;; ((1-L . 1-R) (2-L . 2-R) (3-L . 3-R)) ;; extents of texts
            ;; ==> ((1-R . 2-L) (2-R . 3-L)) ;; extents of connector lines
            (spaces
-            (if (> (length padded-extents-list) 1)
-                (let loop ((orig padded-extents-list)
+            (if (pair? extents)
+                (let loop ((orig extents)
                            (result '()))
                   (if (null? (cdr orig))
                       (reverse result)
@@ -380,9 +247,21 @@ stencils if specified by @code{#t} or @code{#f} in @var{connectors}."
                          (car (second orig)))
                         result))))
                 '()))
-           ;; By default, lines are drawn between all texts
-           (join-all (or (null? connectors)
-                         (eq? #t connectors)))
+           (padding (ly:grob-property grob 'line-X-offset (cons 0.0 0.0)))
+           (padding-L (car padding))
+           (padding-R (cdr padding))
+           ;; incorporate padding
+           (spaces
+            (let loop ((orig spaces) (result '()))
+              (cond
+               ((null? orig) (reverse result))
+               (else
+                (loop (cdr orig)
+                  (cons
+                   (coord-translate
+                    (car orig)
+                    (cons padding-L (- padding-R)))
+                   result))))))
            (offset-Y (ly:grob-property grob 'line-Y-offset 0.0))
            (connector-stils
             (append-map
@@ -390,26 +269,19 @@ stencils if specified by @code{#t} or @code{#f} in @var{connectors}."
                (if (and
                     ;; space too short for line
                     (not (interval-empty? sps))
-                    (or join-all joins))
+                    joins)
                    (list (ly:line-interface::line grob
                            (car sps) offset-Y
                            (cdr sps) offset-Y))
                    '()))
-             spaces connectors))
+             spaces my-connectors))
            (connector-stil (apply ly:stencil-add connector-stils))
            (line-contents (ly:stencil-add connector-stil line-contents)))
 
      line-contents))
 
-#(define (make-stencils grob-or-siblings stil-extent-list connectors)
-   ;; entry point for stencil construction
-   ;; connectors is a list of lists, for example:
-   ;; '((#t #t)) or '((#t #t) (#t #f))
-   (map (lambda (gs sel cs)
-          (make-distributed-line-stencil
-           gs sel cs))
-     grob-or-siblings stil-extent-list connectors))
-
+% Thanks to David Kastrup for suggesting lyricmode entry for 'textSpannerInnerTexts'
+% and coding advice (see http://www.mail-archive.com/lilypond-user%40gnu.org/msg105119.html)
 extractLyricEventInfo =
 #(define-scheme-function (lst) (ly:music?)
    "Given a music expression @var{lst}, return a list of pairs.  The
@@ -424,24 +296,33 @@ associated with that @code{LyricEvent}."
             (cons text hyphen?)))
      (extract-named-music lst 'LyricEvent)))
 
-%% Based on addTextSpannerText, by Thomas Morley.  See
-%% http://www.mail-archive.com/lilypond-user%40gnu.org/msg81685.html
-addTextSpannerText =
+% Initally based on 'addTextSpannerText,' by Thomas Morley.  See
+% http://www.mail-archive.com/lilypond-user%40gnu.org/msg81685.html
+% Stencil function is now an augmented rewrite in Scheme of C++ code
+% found in the source file 'lily/line-spanner.cc'
+textSpannerInnerTexts =
 #(define-music-function (arg) (ly:music?)
+   "Create a @code{TextSpanner} with end and optional inner texts.  Entry is a
+music expression written in @code{lyricmode}.  Lines joining texts are drawn where
+hyphens are specified.  Non-empty texts are required at beginning and end.
+Empty strings (\"\") may be used in inner positions as spacers.  Use
+@code{\\markup\\null} for blank beginnings or ends."
    (let* ((texts-and-connectors (extractLyricEventInfo arg))
           (texts (map car texts-and-connectors)))
-     (if (< (length texts) 2)
+     (if (or (< (length texts) 2)
+             (or (eq? "" (car texts))
+                 (eq? "" (last texts))
+                 (equal? #{ \markup "" #} (car texts))
+                 (equal? #{ \markup "" #} (last texts))))
          (begin
-          (ly:warning "At least two texts required for `addTextSpannerText'.")
+          (ly:warning "Beginning and ending texts required for `textSpannerInnerTexts'.")
           (make-music 'Music))
 
          #{
-           % The following overrides of 'bound-details are needed to give the
-           % correct length to the default spanner we replace.
            \once \override TextSpanner.bound-details.left.text = #(car texts)
-           \once \override TextSpanner.bound-details.left-broken.text = ##f
+           \once \override TextSpanner.bound-details.left-broken.text = \markup \null
            \once \override TextSpanner.bound-details.right.text = #(last texts)
-           \once \override TextSpanner.bound-details.right-broken.text = ##f
+           \once \override TextSpanner.bound-details.right-broken.text = \markup \null
 
            \once \override TextSpanner.stencil =
            #(lambda (grob)
@@ -455,59 +336,172 @@ addTextSpannerText =
                        (if (null? siblings)
                            (list grob)
                            siblings))
-                      (stils (ly:grob-property grob 'text-spanner-stencils)))
-                ;; If stencils haven't been calculated, calculate them.  Once
-                ;; we have results prompted by one sibling, no need to go
-                ;; through elaborate calculation (stencils, collisions, ideal
-                ;; line contents...) for remaining pieces.
-                (if (null? stils)
-                    (let* ((line-stils
-                            (map (lambda (gs) (ly:line-spanner::print gs))
-                              grob-or-siblings))
-                           (line-extents
-                            (map (lambda (s) (ly:stencil-extent s X))
-                              line-stils)))
+                      ; Triggers simple-Y calculations
+                      (simple-y
+                       (and (eq? #t (ly:grob-property grob 'simple-Y))
+                            (not (eq? #t (ly:grob-property grob 'cross-staff)))))
+                      (bound-info-L (ly:grob-property grob 'left-bound-info))
+                      (bound-info-R (ly:grob-property grob 'right-bound-info))
+                      (common-X (ly:grob-common-refpoint
+                                 (ly:spanner-bound grob LEFT)
+                                 (ly:spanner-bound grob RIGHT)
+                                 X))
+                      (common-X (ly:grob-common-refpoint grob common-X X))
+                      (span-points
+                       (list
+                        (cons (assoc-get 'X bound-info-L 0.0)
+                          (assoc-get 'Y bound-info-L 0.0))
+                        (cons (assoc-get 'X bound-info-R 0.0)
+                          (assoc-get 'Y bound-info-R 0.0))))
+                      ; For scaling of 'padding and 'stencil-offset
+                      (magstep (expt 2 (/ (ly:grob-property grob 'font-size 0.0) 6)))
+                      ; confusingly called 'gaps' in C++ source
+                      (bound-padding
+                       (cons (assoc-get 'padding bound-info-L 0.0)
+                         (assoc-get 'padding bound-info-R 0.0)))
+                      ;; arrows not supported in Scheme yet
+                      (arrows
+                       (cons (assoc-get 'arrow bound-info-L #f)
+                         (assoc-get 'arrow bound-info-R #f)))
+                      (stencils
+                       (cons (assoc-get 'stencil bound-info-L)
+                         (assoc-get 'stencil bound-info-R)))
+                      (common-Y
+                       (cons (assoc-get 'common-Y bound-info-L grob)
+                         (assoc-get 'common-Y bound-info-R grob)))
+                      (my-common-Y
+                       (ly:grob-common-refpoint (car common-Y) (cdr common-Y) Y))
+                      (span-points
+                       (if (not simple-y)
+                           (list
+                            (cons (caar span-points)
+                              (+ (cdar span-points)
+                                (ly:grob-relative-coordinate
+                                 (car common-Y) my-common-Y Y)))
+                            (cons (caadr span-points)
+                              (+ (cdadr span-points)
+                                (ly:grob-relative-coordinate
+                                 (cdr common-Y) my-common-Y Y))))
+                           span-points))
+                      (normalized-endpoints
+                       (ly:grob-property grob 'normalized-endpoints (cons 0 1)))
+                      (Y-length (- (cdadr span-points) (cdar span-points)))
+                      (span-points
+                       (list
+                        (cons (caar span-points)
+                          (+ (cdar span-points)
+                            (* (car normalized-endpoints) Y-length)))
+                        (cons (caadr span-points)
+                          (- (cdadr span-points)
+                            (* (- 1 (cdr normalized-endpoints)) Y-length)))))
+                      (dz (offset-subtract (car span-points) (cadr span-points)))
+                      (dz-dir (offset-direction dz)))
+                ;; Draw nothing if total padding is larger than line's length
+                (if (> (+ (car bound-padding) (cdr bound-padding))
+                       (sqrt (+ (* (car dz) (car dz)) (* (cdr dz) (cdr dz)))))
+                    '()
+                    (let* ((line-stencil empty-stencil)
+                           ;; adjust endpoints for padding
+                           (span-points
+                            (list
+                             (coord-translate (car span-points)
+                               (coord-scale dz-dir (* (car bound-padding) magstep)))
+                             (coord-translate (cadr span-points)
+                               (coord-scale dz-dir (* -1 (cdr bound-padding) magstep)))))
+                           (left-stencil
+                            (if (car stencils)
+                                (ly:stencil-translate (car stencils) (car span-points))
+                                #f))
+                           (left-align (assoc-get 'stencil-align-dir-y bound-info-L #f))
+                           (left-off (assoc-get 'stencil-offset bound-info-L #f))
+                           (left-stencil
+                            (if (and left-stencil (number? left-align))
+                                (ly:stencil-aligned-to left-stencil Y left-align)
+                                left-stencil))
+                           (left-stencil
+                            (if (and left-stencil (number-pair? left-off))
+                                (ly:stencil-translate left-stencil (offset-scale left-off magstep))
+                                left-stencil))
+                           (line-stencil
+                            (if left-stencil
+                                (ly:stencil-add line-stencil left-stencil)
+                                line-stencil))
+                           (right-stencil
+                            (if (cdr stencils)
+                                (ly:stencil-translate (cdr stencils) (cadr span-points))
+                                #f))
+                           (right-align (assoc-get 'stencil-align-dir-y bound-info-R #f))
+                           (right-off (assoc-get 'stencil-offset bound-info-R #f))
+                           (right-stencil
+                            (if (and right-stencil (number? right-align))
+                                (ly:stencil-aligned-to right-stencil Y right-align)
+                                right-stencil))
+                           (right-stencil
+                            (if (and right-stencil (number-pair? right-off))
+                                (ly:stencil-translate right-stencil (offset-scale right-off magstep))
+                                right-stencil))
+                           (line-stencil
+                            (if right-stencil
+                                (ly:stencil-add line-stencil right-stencil)
+                                line-stencil))
+                           ;; Adjust endpoints to clear stencils
+                           (span-points
+                            (list
+                             (if (ly:stencil? (car stencils))
+                                 (coord-translate (car span-points)
+                                   (offset-scale
+                                    dz-dir
+                                    (/ (cdr (ly:stencil-extent (car stencils) X))
+                                      (car dz-dir))))
+                                 (car span-points))
+                             (if (ly:stencil? (cdr stencils))
+                                 (coord-translate (cadr span-points)
+                                   (offset-scale
+                                    dz-dir
+                                    (/ (car (ly:stencil-extent (cdr stencils) X))
+                                      (car dz-dir))))
+                                 (cadr span-points))))
+                           ;; for arrow
+                           (adjust (offset-scale dz-dir
+                                     (ly:staff-symbol-staff-space grob)))
+                           (line-left (car span-points)) ; TODO: support arrow
+                           (line-right (cadr span-points)) ; TODO: support arrow
+                           (inner-texts (cdr (list-head texts (1- (length texts))))))
 
-                      (define (get-stil-extent-list text-distrib)
-                        (map (lambda (gs td exts)
-                               (markup-list->stencils-and-extents-for-line
-                                gs td exts))
-                          grob-or-siblings
-                          (vector->list text-distrib)
-                          line-extents))
+                      ;; get and cache line distribution
+                      (if (null? (ly:grob-property grob 'inner-text-count-by-line))
+                          (let* ((line-exts
+                                  (map (lambda (gs) (ly:spanner::bounds-width gs))
+                                    grob-or-siblings))
+                                 (tslc (get-text-distribution inner-texts line-exts)))
+                            (for-each
+                             (lambda (sp)
+                               (set! (ly:grob-property sp 'inner-text-count-by-line)
+                                     tslc))
+                             grob-or-siblings)))
 
-                      (let*
-                       (;; vector which gives the text for unbroken spanner
-                         ;; or for siblings.  This is a preliminary
-                         ;; arrangement, to be tweaked below.
-                         (text-distribution
-                          (get-line-arrangement grob-or-siblings line-extents texts))
-                         (text-distribution (add-markers text-distribution))
-                         (connectors (map cdr texts-and-connectors))
-                         (connectors
-                          (get-broken-connectors grob text-distribution connectors))
-                         (all-stils-and-extents
-                          (get-stil-extent-list text-distribution))
-                         ;; warning printed
-                         (overlaps (check-for-overlaps all-stils-and-extents))
-                         ;; convert stencil/extent list into finished stencil
-                         (line-stils
-                          (make-stencils
-                           grob-or-siblings all-stils-and-extents connectors)))
+                      (let* ((my-inner-texts (get-texts grob grob-or-siblings inner-texts))
+                             (inner-text-stencils
+                              (inner-texts->stencils grob my-inner-texts
+                                (cons (car line-left) (car line-right))))
+                             (all-text-stencils (cons left-stencil inner-text-stencils))
+                             (all-text-stencils (append all-text-stencils (list right-stencil)))
+                             (connector-list (map cdr texts-and-connectors))
+                             (line-stencil
+                              (ly:stencil-add line-stencil
+                                (build-line-stencil grob grob-or-siblings all-text-stencils
+                                  connector-list)))
+                             (line-stencil
+                              (ly:stencil-translate line-stencil
+                                (cons
+                                 (- (ly:grob-relative-coordinate
+                                     grob common-X X))
+                                 (if simple-y
+                                     0.0
+                                     (- (ly:grob-relative-coordinate
+                                         grob my-common-Y Y)))))))
 
-                       (for-each
-                        (lambda (gs)
-                          (set!
-                           (ly:grob-property gs 'text-spanner-stencils)
-                           line-stils))
-                        grob-or-siblings)
-
-                       (set! stils line-stils))))
-
-                ;; Return our stencil
-                (list-ref
-                 stils
-                 (list-index (lambda (x) (eq? x grob)) grob-or-siblings))))
+                        line-stencil)))))
          #})))
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%% END FUNCTIONS TO INCLUDE %%%%%%%%%%%%%%%%%%%%%%%
@@ -517,157 +511,131 @@ addTextSpannerText =
 
 \markup \bold "Default (no inner text possible)"
 
-\relative c'' {
-  %\override TextSpanner.thickness = 5
+{
   \override TextSpanner.bound-details.left.text = "ral"
   \override TextSpanner.bound-details.left-broken.text = ##f
   \override TextSpanner.bound-details.right.text = "do"
   \override TextSpanner.bound-details.right-broken.text = ##f
-  c,1\startTextSpan
+  c'1\startTextSpan
   \break
-  d'1\stopTextSpan
+  c'1\stopTextSpan
 }
 
 \markup \bold "All on one line"
 
-\relative c' {
-  \addTextSpannerText \lyricmode { ral -- len -- tan -- do }
-  c1\startTextSpan
-  d'1\stopTextSpan
+{
+  \textSpannerInnerTexts \lyricmode { ral -- len -- tan -- do }
+  c'1\startTextSpan
+  c'1\stopTextSpan
 }
-
 
 \markup \bold "Broken"
 
-\relative c' {
-  %% to show collision detection
-  %\override TextSpanner.text-spanner-line-count = #'(2 2)
-  \addTextSpannerText \lyricmode { ral -- len -- tan -- do }
-  c1\startTextSpan
+{
+  \textSpannerInnerTexts \lyricmode { ral -- len -- tan -- do }
+  c'1\startTextSpan
   \break
   %c1\break
-  d'1\stopTextSpan
+  c'1\stopTextSpan
 }
 
 \markup \bold "Empty line/manual distribution"
 
-\relative c' {
-  \override TextSpanner.text-spanner-line-count = #'(1 0 1 1)
-  \addTextSpannerText \lyricmode { one -- two -- three }
-  c1~\startTextSpan
+{
+  \override TextSpanner.inner-text-count-by-line = #'(0 0 1 0)
+  \textSpannerInnerTexts \lyricmode { one -- two -- three }
+  c'1~\startTextSpan
   \break
-  c1~
+  c'1~
   \break
-  c1~
+  c'1~
   \break
-  c1\stopTextSpan
+  c'1\stopTextSpan
 }
 
 \markup \bold "Changes of ends"
 
-\relative c' {
-  \addTextSpannerText \lyricmode { one -- two -- three }
-  c1\startTextSpan
-  c1\stopTextSpan
+{
+  \textSpannerInnerTexts \lyricmode { one -- two -- three }
+  c'1\startTextSpan
+  c'1\stopTextSpan
   \once \override TextSpanner.bound-details.left.padding = #-2
   \once \override TextSpanner.bound-details.right.padding = #-5
-  \addTextSpannerText \lyricmode { one -- two -- three }
-  c1\startTextSpan
-  c1\stopTextSpan
+  \textSpannerInnerTexts \lyricmode { one -- two -- three }
+  c'1\startTextSpan
+  c'1\stopTextSpan
 }
 
 \markup \bold "Markups"
 
-\relative c' {
-  \addTextSpannerText \lyricmode {
+{
+  \textSpannerInnerTexts \lyricmode {
     \markup one -- \markup two -- \markup three
   }
-  c1\startTextSpan
-  c1\stopTextSpan
-  \addTextSpannerText \lyricmode {
+  c'1\startTextSpan
+  c'1\stopTextSpan
+  \textSpannerInnerTexts \lyricmode {
     \markup one --
     \markup \with-color #red \translate #'(-3 . 0) two --
     \markup three
   }
-  c1\startTextSpan
-  c1\stopTextSpan
+  c'1\startTextSpan
+  c'1\stopTextSpan
   \override TextSpanner.style = #'dotted-line
   \override TextSpanner.dash-period = #0.5
-  \addTextSpannerText \lyricmode {
+  \textSpannerInnerTexts \lyricmode {
     \markup \right-align one --
     two --
     \markup \center-align three --
   }
-  c1\startTextSpan
-  c1\stopTextSpan
+  c'1\startTextSpan
+  c'1\stopTextSpan
 }
 
-\relative c'' {
+{
   \override TextSpanner.style = #'zigzag
   \override TextSpanner.line-X-offset = #'(0.5 . 0.5)
-  \addTextSpannerText \lyricmode
+  \textSpannerInnerTexts \lyricmode
   {
     \markup \draw-circle #1 #0.2 ##f --
-    \markup \with-color #grey \draw-circle #1 #0.2 ##t --
-    \markup \draw-circle #1 #0.2 ##t --
-    \markup \with-color #grey \draw-circle #1 #0.2 ##t --
-    \markup \draw-circle #1 #0.2 ##f --
+    \markup \halign #LEFT \with-color #grey \draw-circle #1 #0.2 ##t --
+    \markup \halign #LEFT \draw-circle #1 #0.2 ##t --
+    \markup \halign #LEFT \with-color #grey \draw-circle #1 #0.2 ##t --
+    \markup \draw-circle #1 #0.2 ##f
   }
-  c1\startTextSpan
-  %\break
-  d'1 d\stopTextSpan
+  c''1~\startTextSpan
+  c''4\stopTextSpan r r2
 }
 
 \markup \bold "Showing/hiding connectors"
 
-\relative c' {
-  c1
+{
+  c'1
   \override TextSpanner.padding = 3
-
-  \override TextSpanner.text-spanner-line-count = #'(4 0 1)
+  \override TextSpanner.inner-text-count-by-line = #'(2 0 1)
   \textSpannerDown
-  \addTextSpannerText \lyricmode {
+  \textSpannerInnerTexts \lyricmode {
     poco a poco dim. -- \markup \dynamic mf
   }
-  c1\startTextSpan
-  c1 c1
+  c'1\startTextSpan
+  c'1 c'
   \break
-  c1 c1 c1 c1
+  c'1 c' c' c'
   \break
-  c1 c1 c1
-  c1\stopTextSpan
+  c'1 c' c'
+  c'1\stopTextSpan
 }
 
 \markup \bold "Raising/lowering of connector line"
 
-\relative c' {
+{
   \override TextSpanner.line-X-offset = #'(1 . 1)
   \override TextSpanner.line-Y-offset = 0.5
-  \addTextSpannerText \lyricmode { ral -- len -- tan -- do }
-  c1\startTextSpan
-  d'1\stopTextSpan
+  \textSpannerInnerTexts \lyricmode { ral -- len -- tan -- do }
+  c'1\startTextSpan
+  c'1\stopTextSpan
 }
 
-%%{
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% See http://www.lilypond.org/doc/v2.19/Documentation/notation/opera-and-stage-musicals#dialogue-over-music
-music = \relative {
-  \override TextSpanner.text-spanner-line-count = #'(8 5)
-  \addTextSpannerText \lyricmode {
-    \markup \fontsize #1 \upright \smallCaps Abe:
-    Say this over measures one and two
-    and this over measure three
-  }
-  a'4\startTextSpan a a a
-  a4 a a a
-  \break
-  a4 a a a\stopTextSpan
-}
-
-\new Staff {
-  \music
-}
-%}
 \layout {
   indent = 0
   ragged-right = ##f
