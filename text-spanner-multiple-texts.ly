@@ -509,18 +509,6 @@ Empty strings (\"\") may be used in inner positions as spacers.  Use
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% EXAMPLES %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-\markup \bold "Default (no inner text possible)"
-
-{
-  \override TextSpanner.bound-details.left.text = "ral"
-  \override TextSpanner.bound-details.left-broken.text = ##f
-  \override TextSpanner.bound-details.right.text = "do"
-  \override TextSpanner.bound-details.right-broken.text = ##f
-  c'1\startTextSpan
-  \break
-  c'1\stopTextSpan
-}
-
 \markup \bold "All on one line"
 
 {
@@ -553,6 +541,14 @@ Empty strings (\"\") may be used in inner positions as spacers.  Use
   c'1\stopTextSpan
 }
 
+\markup \bold "Spacers"
+
+{
+  \textSpannerInnerTexts \lyricmode { ral -- "" -- len -- tan -- do }
+  c'1\startTextSpan
+  c'1\stopTextSpan
+}
+
 \markup \bold "Changes of ends"
 
 {
@@ -566,7 +562,7 @@ Empty strings (\"\") may be used in inner positions as spacers.  Use
   c'1\stopTextSpan
 }
 
-\markup \bold "Markups"
+\markup \bold "Markups/line styles"
 
 {
   \textSpannerInnerTexts \lyricmode {
@@ -574,6 +570,7 @@ Empty strings (\"\") may be used in inner positions as spacers.  Use
   }
   c'1\startTextSpan
   c'1\stopTextSpan
+  \override TextSpanner.style = ##f
   \textSpannerInnerTexts \lyricmode {
     \markup one --
     \markup \with-color #red \translate #'(-3 . 0) two --
@@ -610,9 +607,9 @@ Empty strings (\"\") may be used in inner positions as spacers.  Use
 \markup \bold "Showing/hiding connectors"
 
 {
-  c'1
+  c'1\ff
   \override TextSpanner.padding = 3
-  \override TextSpanner.inner-text-count-by-line = #'(2 0 1)
+  \override TextSpanner.inner-text-count-by-line = #'(3 0)
   \textSpannerDown
   \textSpannerInnerTexts \lyricmode {
     poco a poco dim. -- \markup \dynamic mf
@@ -621,8 +618,6 @@ Empty strings (\"\") may be used in inner positions as spacers.  Use
   c'1 c'
   \break
   c'1 c' c' c'
-  \break
-  c'1 c' c'
   c'1\stopTextSpan
 }
 
@@ -632,6 +627,26 @@ Empty strings (\"\") may be used in inner positions as spacers.  Use
   \override TextSpanner.line-X-offset = #'(1 . 1)
   \override TextSpanner.line-Y-offset = 0.5
   \textSpannerInnerTexts \lyricmode { ral -- len -- tan -- do }
+  c'1\startTextSpan
+  c'1\stopTextSpan
+}
+
+\markup \bold "No text at ends"
+
+{
+  \textSpannerInnerTexts \lyricmode {
+    \markup \null -- foo -- bar -- \markup \null
+  }
+  c'1\startTextSpan
+  c'1\stopTextSpan
+}
+
+\markup \bold "Bracket"
+
+{
+  \textSpannerInnerTexts \lyricmode {
+    \markup \draw-line #'(0 . -1) -- foo -- bar -- \markup \draw-line #'(0 . -1)
+  }
   c'1\startTextSpan
   c'1\stopTextSpan
 }
