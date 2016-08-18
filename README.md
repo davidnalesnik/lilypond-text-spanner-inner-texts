@@ -10,6 +10,10 @@ for which there is a beginning and/or ending text, but does not provide
 an automated means of creating spanners with additional texts (as when
 a word such as *rallentando* appears as *ral - - len - - tan - - do*).
 
+## Requirements
+
+Requires LilyPond version 2.19.27 or newer.
+
 ## How is it used?
 
 To make this tool available to your LilyPond file, you can either
